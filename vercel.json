@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "outputDirectory": "docs",
+  "functions": {
+    "api/generate.js": {
+      "maxDuration": 60
+    }
+  }
+}
