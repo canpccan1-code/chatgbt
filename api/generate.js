@@ -1,8 +1,8 @@
 const crypto = require("node:crypto");
 
-const MAX_IMAGE_BYTES = 2.6 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 900 * 1024;
 const ALLOWED_SIZES = new Set(["1024x1536", "1024x1024", "1536x1024"]);
-const ALLOWED_QUALITIES = new Set(["medium", "high"]);
+const MODEL = "@cf/black-forest-labs/flux-2-klein-9b";
 
 function sameSecret(left, right) {
   const a = Buffer.from(String(left || ""), "utf8");
@@ -19,10 +19,11 @@ module.exports = async function handler(req, res) {
     return res.status(405).json({ error: "Yalnızca POST isteği kabul edilir." });
   }
 
-  const openAiKey = process.env.OPENAI_API_KEY;
+  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID || "";
+  const cloudflareToken = process.env.CLOUDFLARE_API_TOKEN;
   const appPassword = process.env.APP_PASSWORD;
-  if (!openAiKey || !appPassword) {
-    return res.status(503).json({ error: "Sunucu ayarları tamamlanmamış. Vercel’de OPENAI_API_KEY ve APP_PASSWORD değerlerini ekle." });
+  if (!/^[a-f0-9]{32}$/i.test(accountId) || !cloudflareToken || !appPassword) {
+    return res.status(503).json({ error: "Vercel’de CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN ve APP_PASSWORD ayarlarını tamamla." });
   }
 
   const authorization = req.headers.authorization || "";
@@ -34,7 +35,7 @@ module.exports = async function handler(req, res) {
   const body = req.body && typeof req.body === "object" ? req.body : {};
   const scene = typeof body.scene === "string" ? body.scene.trim() : "";
   const size = ALLOWED_SIZES.has(body.size) ? body.size : "1024x1536";
-  const quality = ALLOWED_QUALITIES.has(body.quality) ? body.quality : "medium";
+  const [width, height] = size.split("x");
   const match = typeof body.image === "string"
     ? /^data:image\/jpeg;base64,([A-Za-z0-9+/]+={0,2})$/.exec(body.image)
     : null;
@@ -49,44 +50,46 @@ module.exports = async function handler(req, res) {
   }
 
   const prompt = [
-    "Create a new photorealistic everyday smartphone photograph using the uploaded image as the identity reference. Depict the same person.",
-    "Preserve their actual face shape, facial features, eye shape and spacing, eye color, eyebrows, nose, lips, jaw, skin tone, natural skin texture, freckles, asymmetries, age, hair color, hairline and natural body proportions.",
-    "Do not beautify, idealize, make the face more symmetric, smooth the skin, add makeup or a beauty filter, or change their body. Keep their identity consistent.",
-    "Change only the scene, pose, clothing, camera angle and lighting as needed for this scene: " + scene + ".",
+    "Create a new photorealistic everyday smartphone photograph. The person in reference image 0 is the same real person; keep their identity recognizable.",
+    "Preserve the person's face shape, facial features, eye shape and spacing, eye color, eyebrows, nose, lips, jaw, skin tone, natural skin texture, freckles, asymmetries, age, hair color, hairline and natural body proportions.",
+    "Do not beautify, idealize, make the face more symmetric, smooth the skin, add makeup or a beauty filter, or change their body. Change only the pose, clothing, camera angle, lighting and setting.",
+    "Scene: " + scene + ".",
     "Use natural ambient light, realistic perspective and shadows, ordinary lived-in details, natural colors and subtle phone-camera grain. Avoid studio lighting, cinematic color grading, excessive HDR and artificial sharpness.",
     "Make the result look like a casual photo taken by a person with a smartphone, not a polished AI portrait."
   ].join(" ");
 
   try {
     const form = new FormData();
-    form.append("model", "gpt-image-2.5-sunburst");
     form.append("prompt", prompt);
-    form.append("quality", quality);
-    form.append("size", size);
-    form.append("output_format", "jpeg");
-    form.append("n", "1");
-    form.append("image", new Blob([imageBytes], { type: "image/jpeg" }), "reference.jpg");
+    form.append("width", width);
+    form.append("height", height);
+    form.append("input_image_0", new Blob([imageBytes], { type: "image/jpeg" }), "reference.jpg");
 
-    const apiResponse = await fetch("https://api.openai.com/v1/images/edits", {
-      method: "POST",
-      headers: { Authorization: "Bearer " + openAiKey },
-      body: form
-    });
+    const apiResponse = await fetch(
+      "https://api.cloudflare.com/client/v4/accounts/" + accountId + "/ai/run/" + MODEL,
+      {
+        method: "POST",
+        headers: { Authorization: "Bearer " + cloudflareToken },
+        body: form
+      }
+    );
     const data = await apiResponse.json().catch(() => null);
-    if (!apiResponse.ok) {
-      const message = data && data.error && data.error.message
-        ? data.error.message
-        : "OpenAI görsel isteğini tamamlayamadı. API kredini ve model erişimini kontrol et.";
-      return res.status(502).json({ error: message });
+    if (!apiResponse.ok || !data || data.success === false) {
+      const cloudflareMessage = data && Array.isArray(data.errors)
+        ? data.errors.map((item) => item && item.message).filter(Boolean).join(" ")
+        : "";
+      return res.status(502).json({
+        error: cloudflareMessage || "Ücretsiz günlük kullanım kotası dolmuş olabilir. Kota sıfırlanınca yeniden dene."
+      });
     }
 
-    const image = data && data.data && data.data[0] && data.data[0].b64_json;
+    const image = data && data.result && data.result.image;
     if (!image) {
-      return res.status(502).json({ error: "OpenAI yanıtında fotoğraf bulunamadı. Yeniden dene." });
+      return res.status(502).json({ error: "Cloudflare yanıtında fotoğraf bulunamadı. Yeniden dene." });
     }
 
     return res.status(200).json({ image: image, mimeType: "image/jpeg" });
   } catch (_) {
-    return res.status(502).json({ error: "OpenAI’ye bağlanılamadı. Sunucu ayarını ve internet bağlantısını kontrol et." });
+    return res.status(502).json({ error: "Cloudflare AI’a bağlanılamadı. Vercel’deki sunucu ayarlarını kontrol et." });
   }
 };
