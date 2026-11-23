@@ -64,7 +64,6 @@ module.exports = async function handler(req, res) {
     form.append("quality", quality);
     form.append("size", size);
     form.append("output_format", "jpeg");
-    form.append("output_compression", "82");
     form.append("n", "1");
     form.append("image", new Blob([imageBytes], { type: "image/jpeg" }), "reference.jpg");
 
